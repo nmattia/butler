@@ -59,12 +59,14 @@ returnAli
   -> AliM p1 p1 a
 returnAli x = AliM $ \impl -> pure (impl, x)
 
-recvAliM :: AliM (('R a) ': xs) xs a
+recvAliM :: AliM (('R a) :-> xs) xs a
 recvAliM = AliM $ \(recv `RCons` impl) -> do
   res <- recv
   return (impl, res)
 
-sendAliM :: a -> AliM (('W a) ': xs) xs ()
+type Ali s a = AliM s Done a
+
+sendAliM :: a -> AliM (('W a) :-> xs) xs ()
 sendAliM msg = AliM $ \(send `WCons` impl) -> do
   () <- send msg
   return (impl, ())
@@ -77,10 +79,47 @@ data Pong where
   Pong :: Pong
   deriving Show
 
-type AliceProtocol = '[ 'W Ping, 'R Pong ]
+type a :-> b = a : b
+type Done = '[]
+infixr :->
+
+type AliceProtocol = 'W Ping :-> 'R Pong :-> Done
 type BobProtocol = FlipRW AliceProtocol
 
-aliceServer :: AliM AliceProtocol '[] ()
+
+
+type family Transition (a :: k1) = (fo :: k2)
+
+data a :<|> b
+infixr :<|>
+
+data a :> b
+infixr :>
+
+bindAl
+  :: AliM p1 p2 a
+  -> (a -> AliM p2 p3 b)
+  -> AliM p1 p3 b
+bindAl al mkAlice = AliM $ \impl -> do
+    (impl', res) <- runAliM al impl
+    runAliM (mkAlice res) impl'
+
+-- recvAl ::
+
+data AliStates
+  = Start
+  | SentPing
+  | Bye
+
+type instance Transition 'Start     = 'W Ping :> 'R Pong :> 'Bye
+-- type instance Transition 'SentPing  = 'R Pong :> 'Bye
+
+type family FlipTrans (a :: k) = (f :: k) where
+  FlipTrans ('W a :> sub) = ('R a :> (FlipTrans sub))
+  FlipTrans ('R a :> sub) = ('W a :> (FlipTrans sub))
+  FlipTrans a = a
+
+aliceServer :: Ali AliceProtocol ()
 aliceServer = do
   sendAliM Ping
   Pong <- recvAliM
@@ -90,7 +129,7 @@ aliceServer = do
     (>>) = bindAli'
     (return) = returnAli
 
-bobServer :: AliM BobProtocol '[] ()
+bobServer :: Ali BobProtocol ()
 bobServer = do
   Ping <- recvAliM
   sendAliM Pong
