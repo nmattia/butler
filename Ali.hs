@@ -31,7 +31,11 @@ data AliM a b c where
   AliSend
     :: forall past future msg
     . (Transition past ~ ('W msg :> future))
-    => ((msg -> IO ()) -> IO ()) -> AliM past future ()
+    => msg -> AliM past future ()
+  AliRecv
+    :: forall past future msg
+    . (Transition past ~ ('R msg :> future))
+    => AliM past future msg
   AliLift
     :: forall past a
     . IO a -> AliM past past a
@@ -44,35 +48,44 @@ data AliM a b c where
     -> AliM p1 p3 b
 
 data Sender bar where
-  Sender :: (Transition past ~ (ev :> future)) =>
-      { senderSend :: forall msg. (ev ~ 'W msg) => msg -> IO ()
-      , senderNext :: Sender future
-      } -> Sender past
+  SenderW :: (Transition past ~ ('W msg :> future)) =>
+      (msg -> IO ()) -> Sender future -> Sender past
+  SenderR :: (Transition past ~ ('R msg :> future)) =>
+      IO msg -> Sender future -> Sender past
+
+type family NextSender (a :: k1) = (b :: k2) where
+  NextSender ('W msg :> future) = Sender future
+  NextSender ('R msg :> future) = Sender future
+  NextSender future = ()
 
 someSender :: Sender 'Start
-someSender = Sender print someSender'
+someSender = SenderW (const (pure ())) someSender'
 
 someSender' :: Sender 'SentPing
-someSender' = Sender print undefined -- someSender''
+someSender' = SenderR (pure Pong) undefined
 
--- someSender'' :: Sender a
--- someSender'' = Sender undefined undefined
+-- runAli'
+  -- :: Sender p1
+  -- -> AliM p1 p2 a
+  -- -> IO a
+-- runAli' = undefined
 
 runAli
-  :: forall p1 p2 a ev
-  . (Transition p1 ~ (ev :> p2))
-  => Sender p1
+  :: Sender p1
   -> AliM p1 p2 a
   -> IO (Sender p2, a)
-runAli Sender{senderNext} (AliLift a1) = do
+runAli snder (AliLift a1) = do
   res <- a1
-  return (senderNext, res)
+  return (snder, res)
 runAli snder (AliBind a1 mkAli) = do
   (snder', res) <- runAli snder a1
   runAli snder' (mkAli res)
-runAli Sender{senderNext, senderSend} (AliSend mkSend) = do
-  res <- mkSend senderSend
-  return (senderNext, res)
+runAli (SenderW send next) (AliSend msg) = do
+  res <- send msg
+  return (next, res)
+runAli (SenderR recv next) AliRecv = do
+  res <- recv
+  return (next, res)
 
 main :: IO ()
 main = pure ()
@@ -97,14 +110,13 @@ sendal
   :: forall past future msg
   . (Transition past ~ ('W msg :> future))
   => msg -> AliM past future ()
-sendal msg = AliSend $ \(send) -> do
-    send msg
+sendal = AliSend
 
 recval
   :: forall past future msg
   . (Transition past ~ ('R msg :> future))
   => AliM past future msg
-recval = undefined
+recval = AliRecv
 
 ali2 :: AliM 'Start 'Bye Pong
 ali2 = do
