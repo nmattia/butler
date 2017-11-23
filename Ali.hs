@@ -1,26 +1,23 @@
 {-# LANGUAGE DataKinds #-}
-{-# LANGUAGE TypeInType #-}
-{-# LANGUAGE TypeFamilyDependencies #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE NoMonomorphismRestriction #-}
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE RebindableSyntax #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TupleSections #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeFamilyDependencies #-}
+{-# LANGUAGE TypeInType #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE TypeSynonymInstances #-}
 
--- import qualified Prelude as P
-import Prelude hiding ((>>), (>>=), return)
-import Data.Kind
--- import Control.Concurrent.Async
---
--- import Control.Concurrent.Chan
 import Control.Monad
--- import Data.Monoid
--- import Data.String
+import Data.Kind
+import Prelude hiding ((>>), (>>=), return)
 
 data Ping where
   Ping :: Ping
@@ -30,32 +27,52 @@ data Pong where
   Pong :: Pong
   deriving Show
 
-data AliM (past :: k1) (future :: k2) a where
+data AliM a b c where
   AliSend
     :: forall past future msg
-    . (Transition past future ~ 'W msg)
+    . (Transition past ~ ('W msg :> future))
     => ((msg -> IO ()) -> IO ()) -> AliM past future ()
   AliLift
     :: forall past a
     . IO a -> AliM past past a
   AliBind
-    :: AliM p1 p2 a
+    :: forall p1 p2 p3 ev1 ev2 a b
+    . ((Transition p1 ~ (ev1 :> p2))
+    , (Transition p2 ~ (ev2 :> p3)))
+    => AliM p1 p2 a
     -> (a -> AliM p2 p3 b)
     -> AliM p1 p3 b
 
-type family In (t :: *) (ts :: [*]) = (f :: Constraint) where
-  In t1 '[t2] = (t1 ~ t2)
+data Sender bar where
+  Sender :: (Transition past ~ (ev :> future)) =>
+      { senderSend :: forall msg. (ev ~ 'W msg) => msg -> IO ()
+      , senderNext :: Sender future
+      } -> Sender past
 
+someSender :: Sender 'Start
+someSender = Sender print someSender'
 
--- class Sends a ts where
-  -- send :: In t ts => a -> t -> IO ()
--- type Sends
-data Sender = Sender (forall msg. msg -> IO ())
+someSender' :: Sender 'SentPing
+someSender' = Sender print undefined -- someSender''
 
-runAli :: Sender -> AliM p1 p2 a -> IO a
-runAli snder (AliLift a1) = a1
-runAli snder (AliBind a1 mkAli) = runAli snder a1 >>= (runAli snder . mkAli)
-runAli (Sender f) (AliSend mkSend) = mkSend f
+-- someSender'' :: Sender a
+-- someSender'' = Sender undefined undefined
+
+runAli
+  :: forall p1 p2 a ev
+  . (Transition p1 ~ (ev :> p2))
+  => Sender p1
+  -> AliM p1 p2 a
+  -> IO (Sender p2, a)
+runAli Sender{senderNext} (AliLift a1) = do
+  res <- a1
+  return (senderNext, res)
+runAli snder (AliBind a1 mkAli) = do
+  (snder', res) <- runAli snder a1
+  runAli snder' (mkAli res)
+runAli Sender{senderNext, senderSend} (AliSend mkSend) = do
+  res <- mkSend senderSend
+  return (senderNext, res)
 
 main :: IO ()
 main = pure ()
@@ -69,60 +86,54 @@ data RW a
   = R a
   | W a
 
-data (a :: RW *) :> (b :: AliStates)
+data (a :: RW *) :> (b :: k)
 infixr :>
-type family Transition (a :: k1) (b :: k2) = (c :: RW *) | c -> a b
-type family Stuff (a :: k1) = (fo :: k2)
+type family Transition (a :: k1) = (b :: k2)  | b -> a
 
-type instance Stuff ('W a :> o) = a -> IO ()
-type instance Stuff ('R a :> o) = IO a
-
-type instance Transition 'Start 'SentPing = 'W Ping
-type instance Transition 'SentPing 'Bye   = 'R Pong
+type instance Transition 'Start = ('W Ping :> 'SentPing)
+type instance Transition 'SentPing = ('R Pong :> 'Bye)
 
 sendal
   :: forall past future msg
-  . (Transition past future ~ 'W msg)
+  . (Transition past ~ ('W msg :> future))
   => msg -> AliM past future ()
 sendal msg = AliSend $ \(send) -> do
     send msg
 
 recval
   :: forall past future msg
-  . (Transition past future ~ 'R msg)
+  . (Transition past ~ ('R msg :> future))
   => AliM past future msg
 recval = undefined
 
-ali2 :: AliM 'Start 'Bye ()
+ali2 :: AliM 'Start 'Bye Pong
 ali2 = do
   sendal Ping
-  Pong <- recval
-  return ()
+  recval
   where
     (>>=) = bindAli
     (>>) = bindAli'
     (return) = returnAli
 
 bindAli
-  :: AliM p1 p2 a
+  :: forall p1 p2 p3 ev1 ev2 a b
+  . ((Transition p1 ~ (ev1 :> p2))
+  , (Transition p2 ~ (ev2 :> p3)))
+  => AliM p1 p2 a
   -> (a -> AliM p2 p3 b)
   -> AliM p1 p3 b
 bindAli = AliBind
--- AliM $ \impl -> do
-    -- (impl', res) <- runAliM al impl
-    -- runAliM (mkAlice res) impl'
 
 bindAli'
-  :: AliM p1 p2 a
+  :: forall p1 p2 p3 ev1 ev2 a b
+  . ((Transition p1 ~ (ev1 :> p2))
+  , (Transition p2 ~ (ev2 :> p3)))
+  => AliM p1 p2 a
   -> AliM p2 p3 b
   -> AliM p1 p3 b
-bindAli' al mkAlice = undefined
-  -- AliM $ \impl -> do
-    -- (impl', _res) <- runAliM al impl
-    -- runAliM mkAlice impl'
+bindAli' al = AliBind al . const
 
 returnAli
   :: a
   -> AliM p1 p1 a
-returnAli x = undefined
--- AliM $ \impl -> pure (impl, x)
+returnAli = AliLift . pure
