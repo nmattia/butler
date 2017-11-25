@@ -1,4 +1,5 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE InstanceSigs #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
@@ -18,8 +19,10 @@
 {-# LANGUAGE UndecidableInstances #-}
 
 import Control.Monad
+import Data.Function (fix)
 import Control.Monad.Indexed
 import Data.Kind
+import Data.Void
 import Prelude hiding ((>>), (>>=), return)
 
 
@@ -33,39 +36,62 @@ data Pong where
 
 data Sender (p1 :: k) where
   Sender
-    :: forall p1 p2 msg
-    . (p1 ~ ( 'W msg :> p2))
-    => (msg -> IO ()) -> Sender p2 -> Sender p1
+    :: forall p1 p2 foo f
+    . (p1 ~ ( foo :> p2), f ~ ToFunc foo)
+    => f -> Sender p2 -> Sender p1
+  SenderSkip
+    :: forall p1 p2
+    . (Transition p1 ~ p2)
+    => Sender p2 -> Sender p1
   -- Done
     -- :: forall p1 p2
     -- . (p1 ~ p2)
     -- => Sender p1 p2
+    --
+    --
+type family ToFunc x where
+  ToFunc ('W msg) = msg -> IO ()
+  ToFunc ('R msg) = IO msg
 
 data AliM :: k1 -> k2 -> Type -> Type where
   PrimOp
     :: forall i j b
     . (Sender i -> IO (Sender j, b)) -> AliM i j b
 
-data PrimOp (a :: k1) (b :: k2) (c :: k3) where
-  AliSend
-    :: forall past next future msg
-    . (past ~ ('W msg  :> future)
-    ,  next ~ future)
-    => msg -> PrimOp past next ()
+class HasReceive m foo where
+  recval :: m foo
 
-  AliRecv
-    :: forall past next future msg
-    . (past ~ ( 'R msg  :> future)
-    ,  next ~ future)
-    => PrimOp past next msg
+instance (i ~ ('R msg :> j)) => HasReceive (AliM i j) msg where
+  recval = PrimOp $ \(Sender recv n) -> do
+    msg <- recv
+    return (n, msg)
 
-sendal
-  :: forall i j msg
-  . (i ~ ('W msg :> j))
-  => msg -> AliM i j ()
-sendal msg = PrimOp $ \(Sender send n) -> do
-  () <- send msg
-  return (n, ())
+instance (Transition i ~ ('R msg :> j)) => HasReceive (AliM i j) msg where
+  recval = PrimOp $ \(SenderSkip (Sender recv n)) -> do
+    msg <- recv
+    return (n, msg)
+
+class HasSend m foo where
+  sendal :: foo -> m ()
+-- skip :: AliM
+
+instance (i ~ ('W msg :> j)) => HasSend (AliM i j) msg where
+  sendal msg = PrimOp $ \(Sender send n) -> do
+    () <- send msg
+    return (n, ())
+
+instance (Transition i ~ ('W msg :> j)) => HasSend (AliM i j) msg where
+  sendal msg = PrimOp $ \(SenderSkip (Sender send n)) -> do
+    () <- send msg
+    return (n, ())
+
+-- sendal
+  -- :: forall i j msg
+  -- . (i ~ ('W msg :> j))
+  -- => msg -> AliM i j ()
+-- sendal msg = PrimOp $ \(Sender send n) -> do
+  -- () <- send msg
+  -- return (n, ())
 
 runPrim :: AliM i j b -> Sender i -> IO (Sender j, b)
 runPrim (PrimOp io) s = io s
@@ -85,6 +111,7 @@ infixr :>
 type family Transition (a :: k1) = (b :: k2)
 
 type instance Transition 'Start = 'W Ping :> 'SentPing
+type instance Transition 'SentPing = 'W Void :> 'SentPing
 -- type instance Transition 'SentPing = 'R Pong :> 'Bye
 
 data HList :: [Type] -> Type where
@@ -113,8 +140,10 @@ instance IxMonad AliM where
 main :: IO ()
 main = void $ runPrim ali2 sender
 
-sender :: Sender ('W Ping :> 'SentPing)
-sender = Sender print undefined
+sender :: Sender 'Start
+sender =
+  let done = (fix (\f -> SenderSkip $ Sender absurd f))
+  in SenderSkip (Sender print done)
 
-ali2 :: AliM ('W Ping :> 'SentPing) 'SentPing ()
+ali2 :: AliM 'Start 'SentPing ()
 ali2 = sendal Ping
