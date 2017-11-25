@@ -1,4 +1,5 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE InstanceSigs #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
@@ -14,10 +15,13 @@
 {-# LANGUAGE TypeInType #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE TypeSynonymInstances #-}
+{-# LANGUAGE UndecidableInstances #-}
 
 import Control.Monad
+import Control.Monad.Indexed
 import Data.Kind
 import Prelude hiding ((>>), (>>=), return)
+
 
 data Ping where
   Ping :: Ping
@@ -27,68 +31,44 @@ data Pong where
   Pong :: Pong
   deriving Show
 
-data AliM a b c where
+data Sender (p1 :: k) where
+  Sender
+    :: forall p1 p2 msg
+    . (p1 ~ ( 'W msg :> p2))
+    => (msg -> IO ()) -> Sender p2 -> Sender p1
+  -- Done
+    -- :: forall p1 p2
+    -- . (p1 ~ p2)
+    -- => Sender p1 p2
+
+data AliM :: k1 -> k2 -> Type -> Type where
+  PrimOp
+    :: forall i j b
+    . (Sender i -> IO (Sender j, b)) -> AliM i j b
+
+data PrimOp (a :: k1) (b :: k2) (c :: k3) where
   AliSend
-    :: forall past future msg
-    . (Transition past ~ ('W msg :> future))
-    => msg -> AliM past future ()
+    :: forall past next future msg
+    . (past ~ ('W msg  :> future)
+    ,  next ~ future)
+    => msg -> PrimOp past next ()
+
   AliRecv
-    :: forall past future msg
-    . (Transition past ~ ('R msg :> future))
-    => AliM past future msg
-  AliLift
-    :: forall past a
-    . IO a -> AliM past past a
-  AliBind
-    :: forall p1 p2 p3 ev1 ev2 a b
-    . ((Transition p1 ~ (ev1 :> p2))
-    , (Transition p2 ~ (ev2 :> p3)))
-    => AliM p1 p2 a
-    -> (a -> AliM p2 p3 b)
-    -> AliM p1 p3 b
+    :: forall past next future msg
+    . (past ~ ( 'R msg  :> future)
+    ,  next ~ future)
+    => PrimOp past next msg
 
-data Sender bar where
-  SenderW :: (Transition past ~ ('W msg :> future)) =>
-      (msg -> IO ()) -> Sender future -> Sender past
-  SenderR :: (Transition past ~ ('R msg :> future)) =>
-      IO msg -> Sender future -> Sender past
+sendal
+  :: forall i j msg
+  . (i ~ ('W msg :> j))
+  => msg -> AliM i j ()
+sendal msg = PrimOp $ \(Sender send n) -> do
+  () <- send msg
+  return (n, ())
 
-type family NextSender (a :: k1) = (b :: k2) where
-  NextSender ('W msg :> future) = Sender future
-  NextSender ('R msg :> future) = Sender future
-  NextSender future = ()
-
-someSender :: Sender 'Start
-someSender = SenderW (const (pure ())) someSender'
-
-someSender' :: Sender 'SentPing
-someSender' = SenderR (pure Pong) undefined
-
--- runAli'
-  -- :: Sender p1
-  -- -> AliM p1 p2 a
-  -- -> IO a
--- runAli' = undefined
-
-runAli
-  :: Sender p1
-  -> AliM p1 p2 a
-  -> IO (Sender p2, a)
-runAli snder (AliLift a1) = do
-  res <- a1
-  return (snder, res)
-runAli snder (AliBind a1 mkAli) = do
-  (snder', res) <- runAli snder a1
-  runAli snder' (mkAli res)
-runAli (SenderW send next) (AliSend msg) = do
-  res <- send msg
-  return (next, res)
-runAli (SenderR recv next) AliRecv = do
-  res <- recv
-  return (next, res)
-
-main :: IO ()
-main = pure ()
+runPrim :: AliM i j b -> Sender i -> IO (Sender j, b)
+runPrim (PrimOp io) s = io s
 
 data AliStates
   = Start
@@ -99,53 +79,42 @@ data RW a
   = R a
   | W a
 
-data (a :: RW *) :> (b :: k)
+data (:>) :: RW Type -> k2 -> Type
 infixr :>
-type family Transition (a :: k1) = (b :: k2)  | b -> a
 
-type instance Transition 'Start = ('W Ping :> 'SentPing)
-type instance Transition 'SentPing = ('R Pong :> 'Bye)
+type family Transition (a :: k1) = (b :: k2)
 
-sendal
-  :: forall past future msg
-  . (Transition past ~ ('W msg :> future))
-  => msg -> AliM past future ()
-sendal = AliSend
+type instance Transition 'Start = 'W Ping :> 'SentPing
+-- type instance Transition 'SentPing = 'R Pong :> 'Bye
 
-recval
-  :: forall past future msg
-  . (Transition past ~ ('R msg :> future))
-  => AliM past future msg
-recval = AliRecv
+data HList :: [Type] -> Type where
+  HCons :: x -> HList xs -> HList (x ': xs)
+  HNil :: HList '[]
 
-ali2 :: AliM 'Start 'Bye Pong
-ali2 = do
-  sendal Ping
-  recval
-  where
-    (>>=) = bindAli
-    (>>) = bindAli'
-    (return) = returnAli
+instance IxPointed AliM where
+  ireturn x = PrimOp (\s -> (return (s, x)))
+instance IxFunctor AliM where
+  imap f (PrimOp io) = PrimOp $ \s -> do
+    (s', res) <- io s
+    return (s', f res)
+instance IxApplicative AliM where
+  iap (PrimOp io1) (PrimOp io2) = PrimOp $ \s -> do
+    (s', f) <- io1 s
+    (s'', res) <- io2 s'
+    return (s'', f res)
+instance IxMonad AliM where
+  ibind :: (a -> AliM j k b) -> AliM i j a -> AliM i k b
+  ibind mkA (PrimOp io1) = PrimOp $ \s -> do
+    (s', res) <- io1 s
+    let PrimOp io2 = mkA res
+    (s'', res') <- io2 s'
+    return (s'', res')
 
-bindAli
-  :: forall p1 p2 p3 ev1 ev2 a b
-  . ((Transition p1 ~ (ev1 :> p2))
-  , (Transition p2 ~ (ev2 :> p3)))
-  => AliM p1 p2 a
-  -> (a -> AliM p2 p3 b)
-  -> AliM p1 p3 b
-bindAli = AliBind
+main :: IO ()
+main = void $ runPrim ali2 sender
 
-bindAli'
-  :: forall p1 p2 p3 ev1 ev2 a b
-  . ((Transition p1 ~ (ev1 :> p2))
-  , (Transition p2 ~ (ev2 :> p3)))
-  => AliM p1 p2 a
-  -> AliM p2 p3 b
-  -> AliM p1 p3 b
-bindAli' al = AliBind al . const
+sender :: Sender ('W Ping :> 'SentPing)
+sender = Sender print undefined
 
-returnAli
-  :: a
-  -> AliM p1 p1 a
-returnAli = AliLift . pure
+ali2 :: AliM ('W Ping :> 'SentPing) 'SentPing ()
+ali2 = sendal Ping
