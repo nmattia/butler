@@ -1,4 +1,5 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE InstanceSigs #-}
 {-# LANGUAGE GADTs #-}
@@ -18,16 +19,41 @@
 {-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE UndecidableInstances #-}
 
-import Control.Monad
+import Control.Monad as M
 import Data.Function (fix)
-import Control.Monad.Indexed
+-- import Control.Monad.Indexed
+import Control.Monad.IO.Class
 import Data.Kind
+import Data.Monoid
+import Data.String
 import Data.Void
 import Prelude hiding ((>>), (>>=), return)
 
+class (IxFunctor m) => IxPointed (m :: k -> k -> Type -> Type) where
+  ireturn :: a -> m i i a
+
+class IxFunctor w => IxCopointed w where
+  iextract :: w i i a -> a
+
+class IxFunctor (f :: k1 -> k2 -> Type -> Type) where
+  imap :: (a -> b) -> f j k a -> f j k b
+
+class IxApply (m :: forall k1 k2. k1 -> k2 -> Type -> Type) where
+  iap :: m i j (a -> b) -> m j k a -> m i k b
+
+class IxMonad (m :: forall k1 k2. k1 -> k2 -> * -> *) where
+  ibind :: (a -> m j k b) -> m i j a -> m i k b
 
 data Ping where
   Ping :: Ping
+  deriving Show
+
+data Quit where
+  Quit :: Quit
+  deriving Show
+
+data Loop where
+  Loop :: Loop
   deriving Show
 
 data Pong where
@@ -35,66 +61,75 @@ data Pong where
   deriving Show
 
 data Sender (p1 :: k) where
-  Sender
+  (:>)
     :: forall p1 p2 foo f
-    . (p1 ~ ( foo :> p2), f ~ ToFunc foo)
+    . (p1 ~ (foo :> p2), f ~ ToFunc foo)
     => f -> Sender p2 -> Sender p1
+  (:<|>)
+    :: forall p p1 p2
+    . (p ~ (p1 :<|> p2))
+    => Sender p1 -> Sender p2 -> Sender p
   SenderSkip
     :: forall p1 p2
     . (Transition p1 ~ p2)
     => Sender p2 -> Sender p1
-  -- Done
-    -- :: forall p1 p2
-    -- . (p1 ~ p2)
-    -- => Sender p1 p2
-    --
-    --
+
 type family ToFunc x where
   ToFunc ('W msg) = msg -> IO ()
   ToFunc ('R msg) = IO msg
+  ToFunc 'D  = Void -> IO ()
 
-data AliM :: k1 -> k2 -> Type -> Type where
-  PrimOp
-    :: forall i j b
-    . (Sender i -> IO (Sender j, b)) -> AliM i j b
+instance Functor (AliM i i) where
+  fmap = imap
+instance Applicative (AliM i i) where
+  (<*>) = iap
+  pure = ireturn
+instance Monad (AliM i i) where
+  (>>=) = flip ibind
+
+-- class Ali2 (m :: k1 -> * -> *) where
+  -- toAli :: Ali2 
+
+instance MonadIO (AliM (i :: k1) (i :: k1))  where
+  liftIO :: IO a -> AliM i i a
+  liftIO io = AliM (\s -> (s,) <$> io)
+
+newtype AliM :: (forall k1 k2. k1 -> k2 -> Type -> Type) where
+  AliM :: (Sender i -> IO (Sender j, b)) -> AliM i j b
 
 class HasReceive m foo where
   recval :: m foo
 
-instance (i ~ ('R msg :> j)) => HasReceive (AliM i j) msg where
-  recval = PrimOp $ \(Sender recv n) -> do
+instance {-# OVERLAPPING #-}
+  i ~ ('R msg :> j) => HasReceive (AliM i j) msg where
+  recval = AliM $ \(recv :> n) -> do
     msg <- recv
     return (n, msg)
 
 instance (Transition i ~ ('R msg :> j)) => HasReceive (AliM i j) msg where
-  recval = PrimOp $ \(SenderSkip (Sender recv n)) -> do
+  recval = AliM $ \(SenderSkip (recv :> n)) -> do
     msg <- recv
     return (n, msg)
 
+-- class HasMoveTo (s :: k1) m where
+  -- moveTo :: forall s. m ()
+
 class HasSend m foo where
   sendal :: foo -> m ()
--- skip :: AliM
 
-instance (i ~ ('W msg :> j)) => HasSend (AliM i j) msg where
-  sendal msg = PrimOp $ \(Sender send n) -> do
+instance {-# OVERLAPPING #-}
+  (i ~ ('W msg :> j)) => HasSend (AliM i j) msg where
+  sendal msg = AliM $ \(send :> n) -> do
     () <- send msg
     return (n, ())
 
 instance (Transition i ~ ('W msg :> j)) => HasSend (AliM i j) msg where
-  sendal msg = PrimOp $ \(SenderSkip (Sender send n)) -> do
+  sendal msg = AliM $ \(SenderSkip (send :> n)) -> do
     () <- send msg
     return (n, ())
 
--- sendal
-  -- :: forall i j msg
-  -- . (i ~ ('W msg :> j))
-  -- => msg -> AliM i j ()
--- sendal msg = PrimOp $ \(Sender send n) -> do
-  -- () <- send msg
-  -- return (n, ())
-
 runPrim :: AliM i j b -> Sender i -> IO (Sender j, b)
-runPrim (PrimOp io) s = io s
+runPrim (AliM io) s = io s
 
 data AliStates
   = Start
@@ -104,46 +139,99 @@ data AliStates
 data RW a
   = R a
   | W a
+  | D
 
-data (:>) :: RW Type -> k2 -> Type
+data (:>) :: RW Type -> k -> Type
 infixr :>
+
+data (:<|>) :: k1 -> k2 -> Type
+infixr :<|>
 
 type family Transition (a :: k1) = (b :: k2)
 
-type instance Transition 'Start = 'W Ping :> 'SentPing
-type instance Transition 'SentPing = 'W Void :> 'SentPing
--- type instance Transition 'SentPing = 'R Pong :> 'Bye
+class MoveTo next left right where
+  moveTo :: AliM (left :<|> right) next ()
 
-data HList :: [Type] -> Type where
-  HCons :: x -> HList xs -> HList (x ': xs)
-  HNil :: HList '[]
+instance MoveTo left left right where
+  moveTo = AliM $ \(s :<|> _) -> return (s, ())
+
+-- TODO: this shouldn't be needed
+instance MoveTo right left right where
+  moveTo = AliM $ \(_ :<|> s) -> return (s, ())
+
+instance (right ~ (left' :<|> right'), MoveTo foo left' right')
+  => MoveTo foo left right where
+  moveTo = (\() -> moveTo @foo @left' @right')
+    `ibind` (AliM (\(_ :<|> s) -> return (s,())))
+
+
+
+-- pick :: forall next past. (past ~ (next
+
+assert :: forall s i. (s ~ i) => AliM i i ()
+assert = ireturn ()
 
 instance IxPointed AliM where
-  ireturn x = PrimOp (\s -> (return (s, x)))
+  ireturn x = AliM (\s -> (return (s, x)))
 instance IxFunctor AliM where
-  imap f (PrimOp io) = PrimOp $ \s -> do
+  imap f (AliM io) = AliM $ \s -> do
     (s', res) <- io s
     return (s', f res)
-instance IxApplicative AliM where
-  iap (PrimOp io1) (PrimOp io2) = PrimOp $ \s -> do
+instance IxApply AliM where
+  iap (AliM io1) (AliM io2) = AliM $ \s -> do
     (s', f) <- io1 s
     (s'', res) <- io2 s'
     return (s'', f res)
 instance IxMonad AliM where
   ibind :: (a -> AliM j k b) -> AliM i j a -> AliM i k b
-  ibind mkA (PrimOp io1) = PrimOp $ \s -> do
+  ibind mkA (AliM io1) = AliM $ \s -> do
     (s', res) <- io1 s
-    let PrimOp io2 = mkA res
+    let AliM io2 = mkA res
     (s'', res') <- io2 s'
     return (s'', res')
+
+type instance Transition 'Start =
+  'W Ping :> 'R Pong :> 'W Int :> ('Start :<|> 'Bye)
+
+type instance Transition 'Bye = 'D :> 'Bye
 
 main :: IO ()
 main = void $ runPrim ali2 sender
 
 sender :: Sender 'Start
-sender =
-  let done = (fix (\f -> SenderSkip $ Sender absurd f))
-  in SenderSkip (Sender print done)
+sender = fix $ \f ->
+    SenderSkip $ lolsend :> lolrecv :> lolsend :> (f :<|> done)
+  where
+    done = (fix (\f -> SenderSkip $ absurd :> f))
 
-ali2 :: AliM 'Start 'SentPing ()
-ali2 = sendal Ping
+lolsend :: Show a => a -> IO ()
+lolsend x = putStrLn ("Sending " <> show x)
+
+lolrecv :: IO Pong
+lolrecv = putStrLn ("Receiving PONG" :: String) >> pure Pong
+
+ali2 :: AliM 'Start 'Bye Pong
+ali2 = do
+  sendal Ping
+  res <- recval
+  sendal 2
+  moveTo @'Bye
+  liftIO (M.return ()) :: AliM i i ()
+  liftIO (M.return ()) :: AliM i i ()
+  liftIO (M.return ()) :: AliM i i ()
+  liftIO (M.return ()) :: AliM i i ()
+  -- liftIO (M.return ())
+  -- liftIO (M.return ())
+  -- liftIO (M.return ())
+  -- () <- return ()
+  -- () <- return ()
+  -- () <- return ()
+  -- () <- return ()
+  -- () <- return ()
+  -- () <- return ()
+  -- () <- return ()
+  return res
+  where
+    (>>) f mk = ibind (const mk) f
+    (>>=) f mk = ibind mk f
+    return = ireturn
