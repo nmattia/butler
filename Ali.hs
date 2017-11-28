@@ -21,7 +21,6 @@
 
 import Control.Monad as M
 import Data.Function (fix)
--- import Control.Monad.Indexed
 import Control.Monad.IO.Class
 import Data.Kind
 import Data.Monoid
@@ -29,11 +28,8 @@ import Data.String
 import Data.Void
 import Prelude hiding ((>>), (>>=), return)
 
-class (IxFunctor m) => IxPointed (m :: k -> k -> Type -> Type) where
+class IxFunctor m => IxPointed m where
   ireturn :: a -> m i i a
-
-class IxFunctor w => IxCopointed w where
-  iextract :: w i i a -> a
 
 class IxFunctor (f :: k1 -> k2 -> Type -> Type) where
   imap :: (a -> b) -> f j k a -> f j k b
@@ -50,10 +46,6 @@ data Ping where
 
 data Quit where
   Quit :: Quit
-  deriving Show
-
-data Loop where
-  Loop :: Loop
   deriving Show
 
 data Pong where
@@ -74,10 +66,11 @@ data Sender (p1 :: k) where
     . (Transition p1 ~ p2)
     => Sender p2 -> Sender p1
 
-type family ToFunc x where
-  ToFunc ('W msg) = msg -> IO ()
-  ToFunc ('R msg) = IO msg
-  ToFunc 'D  = Void -> IO ()
+-- TODO: figure out how to pass this as an argument
+type family ToFunc (x :: k)
+type instance  ToFunc ('W msg) = msg -> IO ()
+type instance  ToFunc ('R msg) = IO msg
+type instance  ToFunc 'D  = Void -> IO ()
 
 instance Functor (AliM i i) where
   fmap = imap
@@ -87,13 +80,14 @@ instance Applicative (AliM i i) where
 instance Monad (AliM i i) where
   (>>=) = flip ibind
 
--- class Ali2 (m :: k1 -> * -> *) where
-  -- toAli :: Ali2 
-
 instance MonadIO (AliM (i :: k1) (i :: k1))  where
   liftIO :: IO a -> AliM i i a
   liftIO io = AliM (\s -> (s,) <$> io)
 
+-- TODO: AliT
+--
+-- Note: States may have kind "StateType" or (foo :> StateType) or ... so AliM
+-- should be polykinded
 newtype AliM :: (forall k1 k2. k1 -> k2 -> Type -> Type) where
   AliM :: (Sender i -> IO (Sender j, b)) -> AliM i j b
 
@@ -110,9 +104,6 @@ instance (Transition i ~ ('R msg :> j)) => HasReceive (AliM i j) msg where
   recval = AliM $ \(SenderSkip (recv :> n)) -> do
     msg <- recv
     return (n, msg)
-
--- class HasMoveTo (s :: k1) m where
-  -- moveTo :: forall s. m ()
 
 class HasSend m foo where
   sendal :: foo -> m ()
@@ -193,11 +184,15 @@ instance IxMonad AliM where
 type instance Transition 'Start =
   'W Ping :> 'R Pong :> 'W Int :> ('Start :<|> 'Bye)
 
-type instance Transition 'Bye = 'D :> 'Bye
+-- Note: this seems to be needed in order to implement 'Senders'
+type instance Transition 'Bye = Done 'Bye
+
+type Done a = 'D :> a
 
 main :: IO ()
 main = void $ runPrim ali2 sender
 
+-- TODO: create a generic Sender for Binary, store, etc
 sender :: Sender 'Start
 sender = fix $ \f ->
     SenderSkip $ lolsend :> lolrecv :> lolsend :> (f :<|> done)
@@ -216,12 +211,11 @@ ali2 = do
   res <- recval
   sendal 2
   moveTo @'Bye
-  liftIO (M.return ()) :: AliM i i ()
-  liftIO (M.return ()) :: AliM i i ()
-  liftIO (M.return ()) :: AliM i i ()
-  liftIO (M.return ()) :: AliM i i ()
+  -- liftIO (M.return ()) :: AliM i i ()
+  -- liftIO (M.return ()) :: AliM i i ()
+  -- liftIO (M.return ()) :: AliM i i ()
   -- liftIO (M.return ())
-  -- liftIO (M.return ())
+  liftIO (M.return ())
   -- liftIO (M.return ())
   -- () <- return ()
   -- () <- return ()
