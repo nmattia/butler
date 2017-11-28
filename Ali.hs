@@ -132,7 +132,7 @@ data RW a
   | W a
   | D
 
-data (:>) :: RW Type -> k -> Type
+data (:>) :: k1 -> k2 -> Type
 infixr :>
 
 data (:<|>) :: k1 -> k2 -> Type
@@ -195,8 +195,13 @@ main = void $ runPrim ali2 sender
 -- TODO: create a generic Sender for Binary, store, etc
 sender :: Sender 'Start
 sender = fix $ \f ->
-    SenderSkip $ lolsend :> lolrecv :> lolsend :> (f :<|> done)
+    SenderSkip $
+      lolsend :>
+      lolrecv :>
+      lolsend :>
+      (f :<|> done)
   where
+    done :: Sender 'Bye
     done = (fix (\f -> SenderSkip $ absurd :> f))
 
 lolsend :: Show a => a -> IO ()
