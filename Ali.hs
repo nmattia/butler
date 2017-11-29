@@ -1,4 +1,7 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FunctionalDependencies #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE InstanceSigs #-}
@@ -26,6 +29,8 @@ import Data.Kind
 import Data.Monoid
 import Data.String
 import Data.Void
+import Data.Proxy
+import Data.Reflection hiding (D)
 import Prelude hiding ((>>), (>>=), return)
 
 class IxFunctor m => IxPointed m where
@@ -52,25 +57,22 @@ data Pong where
   Pong :: Pong
   deriving Show
 
-data Sender (p1 :: k) where
+data Sender (p1 :: k1) (map :: k) where
   (:>)
-    :: forall p1 p2 foo f
-    . (p1 ~ (foo :> p2), f ~ ToFunc foo)
-    => f -> Sender p2 -> Sender p1
+    :: forall p1 p2 c map ix val
+    . (p1 ~ (ix :> p2), Mapping map ix ~ val)
+    => val -> Sender p2 map -> Sender p1 map
   (:<|>)
-    :: forall p p1 p2
+    :: forall p p1 p2 c
     . (p ~ (p1 :<|> p2))
-    => Sender p1 -> Sender p2 -> Sender p
+    => Sender p1 c -> Sender p2 c -> Sender p c
   SenderSkip
-    :: forall p1 p2
+    :: forall p1 p2 c
     . (Transition p1 ~ p2)
-    => Sender p2 -> Sender p1
+    => Sender p2 c -> Sender p1 c
 
--- TODO: figure out how to pass this as an argument
-type family ToFunc (x :: k)
-type instance  ToFunc ('W msg) = msg -> IO ()
-type instance  ToFunc ('R msg) = IO msg
-type instance  ToFunc 'D  = Void -> IO ()
+type family Mapping (map :: k) (ix :: Type) = (val :: Type)
+
 
 instance Functor (AliM i i) where
   fmap = imap
@@ -84,42 +86,46 @@ instance MonadIO (AliM (i :: k1) (i :: k1))  where
   liftIO :: IO a -> AliM i i a
   liftIO io = AliM (\s -> (s,) <$> io)
 
+data R :: Type -> Type
+data W :: Type -> Type
+data D :: Type
+
 -- TODO: AliT
 --
 -- Note: States may have kind "StateType" or (foo :> StateType) or ... so AliM
 -- should be polykinded
-newtype AliM :: (forall k1 k2. k1 -> k2 -> Type -> Type) where
-  AliM :: (Sender i -> IO (Sender j, b)) -> AliM i j b
+data AliM :: (forall k1 k2. k1 -> k2 -> Type -> Type) where
+  AliM :: (Sender i ServerMapping -> IO (Sender j ServerMapping, b)) -> AliM i j b
 
 class HasReceive m foo where
   recval :: m foo
 
 instance {-# OVERLAPPING #-}
-  i ~ ('R msg :> j) => HasReceive (AliM i j) msg where
-  recval = AliM $ \(recv :> n) -> do
-    msg <- recv
+  i ~ (R msg :> j) => HasReceive (AliM i j) msg where
+  recval = AliM $ \((recv :: IO msg) :> n) -> do
+    msg <- (recv :: IO msg)
     return (n, msg)
 
-instance (Transition i ~ ('R msg :> j)) => HasReceive (AliM i j) msg where
+instance (Transition i ~ (R msg :> j)) => HasReceive (AliM i j) msg where
   recval = AliM $ \(SenderSkip (recv :> n)) -> do
-    msg <- recv
+    msg <- (recv :: IO msg)
     return (n, msg)
 
 class HasSend m foo where
   sendal :: foo -> m ()
 
 instance {-# OVERLAPPING #-}
-  (i ~ ('W msg :> j)) => HasSend (AliM i j) msg where
+  (i ~ (W msg :> j)) => HasSend (AliM i j) msg where
   sendal msg = AliM $ \(send :> n) -> do
     () <- send msg
     return (n, ())
 
-instance (Transition i ~ ('W msg :> j)) => HasSend (AliM i j) msg where
+instance (Transition i ~ (W msg :> j)) => HasSend (AliM i j) msg where
   sendal msg = AliM $ \(SenderSkip (send :> n)) -> do
     () <- send msg
     return (n, ())
 
-runPrim :: AliM i j b -> Sender i -> IO (Sender j, b)
+runPrim :: AliM i j b -> Sender i ServerMapping -> IO (Sender j ServerMapping, b)
 runPrim (AliM io) s = io s
 
 data AliStates
@@ -155,10 +161,6 @@ instance (right ~ (left' :<|> right'), MoveTo foo left' right')
   moveTo = (\() -> moveTo @foo @left' @right')
     `ibind` (AliM (\(_ :<|> s) -> return (s,())))
 
-
-
--- pick :: forall next past. (past ~ (next
-
 assert :: forall s i. (s ~ i) => AliM i i ()
 assert = ireturn ()
 
@@ -180,20 +182,31 @@ instance IxMonad AliM where
     let AliM io2 = mkA res
     (s'', res') <- io2 s'
     return (s'', res')
+type Done a = D :> a
+
+
+-------------------------------------------------------------------------------
+-------------------------------------------------------------------------------
+
+data ServerMapping
+
+type instance Mapping ServerMapping (W msg) = msg -> IO ()
+type instance Mapping ServerMapping (R msg) = IO msg
+type instance Mapping ServerMapping D = Void -> IO ()
+
 
 type instance Transition 'Start =
-  'W Ping :> 'R Pong :> 'W Int :> ('Start :<|> 'Bye)
+  W Ping :> R Pong :> W Int :> ('Start :<|> 'Bye)
 
 -- Note: this seems to be needed in order to implement 'Senders'
 type instance Transition 'Bye = Done 'Bye
 
-type Done a = 'D :> a
 
 main :: IO ()
 main = void $ runPrim ali2 sender
 
 -- TODO: create a generic Sender for Binary, store, etc
-sender :: Sender 'Start
+sender :: Sender 'Start ServerMapping
 sender = fix $ \f ->
     SenderSkip $
       lolsend :>
@@ -201,7 +214,6 @@ sender = fix $ \f ->
       lolsend :>
       (f :<|> done)
   where
-    done :: Sender 'Bye
     done = (fix (\f -> SenderSkip $ absurd :> f))
 
 lolsend :: Show a => a -> IO ()
@@ -211,26 +223,20 @@ lolrecv :: IO Pong
 lolrecv = putStrLn ("Receiving PONG" :: String) >> pure Pong
 
 ali2 :: AliM 'Start 'Bye Pong
-ali2 = do
+ali2 = flip fix 0 (\f x -> do
   sendal Ping
   res <- recval
   sendal 2
-  moveTo @'Bye
-  -- liftIO (M.return ()) :: AliM i i ()
-  -- liftIO (M.return ()) :: AliM i i ()
-  -- liftIO (M.return ()) :: AliM i i ()
-  -- liftIO (M.return ())
-  liftIO (M.return ())
-  -- liftIO (M.return ())
-  -- () <- return ()
-  -- () <- return ()
-  -- () <- return ()
-  -- () <- return ()
-  -- () <- return ()
-  -- () <- return ()
-  -- () <- return ()
-  return res
+  if x < 2
+  then do
+    moveTo @'Bye :: AliM ('Start :<|> 'Bye) 'Bye ()
+    return res
+  else do
+    moveTo @'Start :: AliM ('Start :<|> 'Bye) 'Start ()
+    f (x + 1)
+  )
   where
     (>>) f mk = ibind (const mk) f
     (>>=) f mk = ibind mk f
     return = ireturn
+    ifThenElse a b c = if a then b else c
