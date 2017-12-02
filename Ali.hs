@@ -25,25 +25,13 @@
 import Control.Monad as M
 import Data.Function (fix)
 import Control.Monad.IO.Class
+import Control.Monad.Indexed
 import Data.Kind
 import Data.Monoid
 import Data.String
 import Data.Void
 import Data.Proxy
-import Data.Reflection hiding (D)
 import Prelude hiding ((>>), (>>=), return)
-
-class IxFunctor m => IxPointed m where
-  ireturn :: a -> m i i a
-
-class IxFunctor (f :: k1 -> k2 -> Type -> Type) where
-  imap :: (a -> b) -> f j k a -> f j k b
-
-class IxApply (m :: forall k1 k2. k1 -> k2 -> Type -> Type) where
-  iap :: m i j (a -> b) -> m j k a -> m i k b
-
-class IxMonad (m :: forall k1 k2. k1 -> k2 -> * -> *) where
-  ibind :: (a -> m j k b) -> m i j a -> m i k b
 
 data Ping where
   Ping :: Ping
@@ -57,7 +45,7 @@ data Pong where
   Pong :: Pong
   deriving Show
 
-data Sender (p1 :: k1) (map :: k) where
+data Sender p1 map where
   (:>)
     :: forall p1 p2 c map ix val
     . (p1 ~ (ix :> p2), Mapping map ix ~ val)
@@ -82,7 +70,7 @@ instance Applicative (AliM i i) where
 instance Monad (AliM i i) where
   (>>=) = flip ibind
 
-instance MonadIO (AliM (i :: k1) (i :: k1))  where
+instance (i ~ j) => MonadIO (AliM i j) where
   liftIO :: IO a -> AliM i i a
   liftIO io = AliM (\s -> (s,) <$> io)
 
@@ -94,7 +82,7 @@ data D :: Type
 --
 -- Note: States may have kind "StateType" or (foo :> StateType) or ... so AliM
 -- should be polykinded
-data AliM :: (forall k1 k2. k1 -> k2 -> Type -> Type) where
+newtype AliM i j a where
   AliM :: (Sender i ServerMapping -> IO (Sender j ServerMapping, b)) -> AliM i j b
 
 class HasReceive m foo where
@@ -106,10 +94,10 @@ instance {-# OVERLAPPING #-}
     msg <- (recv :: IO msg)
     return (n, msg)
 
-instance (Transition i ~ (R msg :> j)) => HasReceive (AliM i j) msg where
-  recval = AliM $ \(SenderSkip (recv :> n)) -> do
-    msg <- (recv :: IO msg)
-    return (n, msg)
+-- instance (Transition i ~ (R msg :> j)) => HasReceive (AliM i j) msg where
+  -- recval = AliM $ \(SenderSkip (recv :> n)) -> do
+    -- msg <- (recv :: IO msg)
+    -- return (n, msg)
 
 class HasSend m foo where
   sendal :: foo -> m ()
@@ -117,17 +105,25 @@ class HasSend m foo where
 instance {-# OVERLAPPING #-}
   (i ~ (W msg :> j)) => HasSend (AliM i j) msg where
   sendal msg = AliM $ \(send :> n) -> do
+    putStrLn "PLOP"
     () <- send msg
+    putStrLn "PLIP"
     return (n, ())
 
-instance (Transition i ~ (W msg :> j)) => HasSend (AliM i j) msg where
-  sendal msg = AliM $ \(SenderSkip (send :> n)) -> do
-    () <- send msg
-    return (n, ())
+-- instance (Transition i ~ (W msg :> j)) => HasSend (AliM i j) msg where
+  -- sendal msg = AliM $ \(SenderSkip (send :> n)) -> do
+    -- () <- send msg
+    -- return (n, ())
+
+transition :: (Transition i ~ j) => AliM i j ()
+transition = AliM $ \(SenderSkip (x :: Sender j ServerMapping)) -> pure (x,())
 
 runPrim :: AliM i j b -> Sender i ServerMapping -> IO (Sender j ServerMapping, b)
 runPrim (AliM io) s = io s
 
+data Start
+data SentPing
+data Bye
 data AliStates
   = Start
   | SentPing
@@ -152,14 +148,14 @@ class MoveTo next left right where
 instance MoveTo left left right where
   moveTo = AliM $ \(s :<|> _) -> return (s, ())
 
--- TODO: this shouldn't be needed
+-- -- TODO: this shouldn't be needed
 instance MoveTo right left right where
   moveTo = AliM $ \(_ :<|> s) -> return (s, ())
 
-instance (right ~ (left' :<|> right'), MoveTo foo left' right')
-  => MoveTo foo left right where
-  moveTo = (\() -> moveTo @foo @left' @right')
-    `ibind` (AliM (\(_ :<|> s) -> return (s,())))
+-- instance (right ~ (left' :<|> right'), MoveTo foo left' right')
+  -- => MoveTo foo left right where
+  -- moveTo = (\() -> moveTo @foo @left' @right')
+    -- `ibind` (AliM (\(_ :<|> s) -> return (s,())))
 
 assert :: forall s i. (s ~ i) => AliM i i ()
 assert = ireturn ()
@@ -170,7 +166,7 @@ instance IxFunctor AliM where
   imap f (AliM io) = AliM $ \s -> do
     (s', res) <- io s
     return (s', f res)
-instance IxApply AliM where
+instance IxApplicative AliM where
   iap (AliM io1) (AliM io2) = AliM $ \s -> do
     (s', f) <- io1 s
     (s'', res) <- io2 s'
@@ -179,8 +175,11 @@ instance IxMonad AliM where
   ibind :: (a -> AliM j k b) -> AliM i j a -> AliM i k b
   ibind mkA (AliM io1) = AliM $ \s -> do
     (s', res) <- io1 s
+    putStrLn "BAR"
     let AliM io2 = mkA res
+    putStrLn "BAZ"
     (s'', res') <- io2 s'
+    putStrLn "BAQ"
     return (s'', res')
 type Done a = D :> a
 
@@ -194,19 +193,17 @@ type instance Mapping ServerMapping (W msg) = msg -> IO ()
 type instance Mapping ServerMapping (R msg) = IO msg
 type instance Mapping ServerMapping D = Void -> IO ()
 
-
-type instance Transition 'Start =
-  W Ping :> R Pong :> W Int :> ('Start :<|> 'Bye)
+type instance Transition Start =
+  W Ping :> R Pong :> W Int :> (Start :<|> Bye)
 
 -- Note: this seems to be needed in order to implement 'Senders'
-type instance Transition 'Bye = Done 'Bye
-
+type instance Transition Bye = Done Bye
 
 main :: IO ()
 main = void $ runPrim ali2 sender
 
 -- TODO: create a generic Sender for Binary, store, etc
-sender :: Sender 'Start ServerMapping
+sender :: Sender Start ServerMapping
 sender = fix $ \f ->
     SenderSkip $
       lolsend :>
@@ -214,6 +211,7 @@ sender = fix $ \f ->
       lolsend :>
       (f :<|> done)
   where
+    done :: Sender Bye ServerMapping
     done = (fix (\f -> SenderSkip $ absurd :> f))
 
 lolsend :: Show a => a -> IO ()
@@ -222,17 +220,22 @@ lolsend x = putStrLn ("Sending " <> show x)
 lolrecv :: IO Pong
 lolrecv = putStrLn ("Receiving PONG" :: String) >> pure Pong
 
-ali2 :: AliM 'Start 'Bye Pong
+ali2 :: AliM Start Bye Pong
 ali2 = flip fix 0 (\f x -> do
+  transition
   sendal Ping
   res <- recval
-  sendal 2
-  if x < 2
+  sendal x
+  liftIO (putStrLn "DAH")
+  if x > (2 :: Int)
   then do
-    moveTo @'Bye :: AliM ('Start :<|> 'Bye) 'Bye ()
+    liftIO (putStrLn "DIB")
+    moveTo @Bye :: AliM (Start :<|> Bye) Bye ()
     return res
   else do
-    moveTo @'Start :: AliM ('Start :<|> 'Bye) 'Start ()
+    liftIO (putStrLn "LIB")
+    liftIO (putStrLn "DOR")
+    moveTo @Start :: AliM (Start :<|> Bye) Start ()
     f (x + 1)
   )
   where
