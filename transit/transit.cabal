@@ -1,0 +1,22 @@
+name:                transit
+version:             0.1.0.0
+synopsis:            Typed state and transitions
+homepage:            https://github.com/nmattia/butler
+license:             MIT
+author:              Nicolas Mattia
+maintainer:          nicolas@nmattia.com
+copyright:           (c) 2017 Nicolas Mattia
+category:            Tools
+build-type:          Simple
+extra-source-files:  README.md
+cabal-version:       >=1.10
+
+library
+  hs-source-dirs:     src/
+  ghc-options:         -Wall
+  exposed-modules:
+                      Transit.Types
+  build-depends:
+                       base
+                     , indexed
+  default-language:    Haskell2010

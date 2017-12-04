@@ -1,0 +1,38 @@
+name:                protolol
+version:             0.1.0.0
+synopsis:            Typed protocols
+homepage:            https://github.com/nmattia/butler
+license:             MIT
+author:              Nicolas Mattia
+maintainer:          nicolas@nmattia.com
+copyright:           (c) 2017 Nicolas Mattia
+category:            Tools
+build-type:          Simple
+extra-source-files:  README.md
+cabal-version:       >=1.10
+
+library
+  hs-source-dirs:     src/
+  ghc-options:         -Wall
+  exposed-modules:
+                      Transit.Protolol
+  build-depends:
+                       base
+                     , transit
+                     , async
+                     , time
+                     , indexed
+  default-language:    Haskell2010
+
+executable protolol-duplex
+  main-is:             Duplex.hs
+  hs-source-dirs:      examples/
+  ghc-options:         -threaded -rtsopts -with-rtsopts=-N -Wall
+  build-depends:
+                       base
+                     , protolol
+                     , transit
+                     , async
+                     , time
+                     , indexed
+  default-language:    Haskell2010

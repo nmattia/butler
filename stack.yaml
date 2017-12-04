@@ -1,0 +1,8 @@
+resolver: lts-9.17
+
+packages:
+- transit
+- protolol
+
+extra-deps:
+- indexed-0.1.3
