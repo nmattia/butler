@@ -40,14 +40,22 @@ data Duplex a = Duplex { sendChan :: Chan a, recvChan :: Chan a }
 swapDuplex :: Duplex a -> Duplex a
 swapDuplex (Duplex a b) = Duplex b a
 
+-- | Server transport implementation
 serverTransport :: Duplex Message -> Transport Start ServerMapping
 serverTransport c = fix $ \f ->
     Transition $
       sendPingGoodBye c :> (recvPong c :> sendChrono c :> f
                       :<|>  done)
+
+-- | Client transport implementation
+clientTransport :: Duplex Message -> Transport Start ClientMapping
+clientTransport c = fix $ \f ->
+    Transition $
+      recvPingGoodBye c :> (sendPong c :> recvChrono c :> f
+                      :<|>  done)
 ```
 
-Here is the server logic for the protocol:
+Here are the server and client logic implementations:
 
 ``` haskell
 server :: ServerM Start Quit ()
@@ -67,6 +75,22 @@ server = flip fix 1 (\f x -> do
       send (Right GoodBye)
       route @Quit
     )
+
+client :: ClientM Start Quit ()
+client = fix (\f -> do
+    transition
+    msg <- receive
+    case msg of
+      Left Ping -> do
+        route @(C Pong :> S NominalDiffTime :> Start)
+        send Pong
+        x <- receive
+        liftIO (putStrLn $ "Roundtrip took: " <> show x)
+        f
+      Right GoodBye -> do
+        route @Quit
+        return ()
+    )
 ```
 
 Here are the server and client running (assuming corresponding client
@@ -77,6 +101,6 @@ main :: IO ()
 main = do
     sdup <- Duplex <$> newChan <*> newChan
     void $ concurrently
-      (untypedServer sdup)
-      (untypedClient (swapDuplex sdup))
+      (evalTransitT server (serverTransport sdup))
+      (evalTransitT client (clientTransport (swapDuplex sdup)))
 ```
