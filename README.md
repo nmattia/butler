@@ -30,10 +30,10 @@ type instance Transition Quit = Done Quit
 ```
 
 
-Here is an transport implementation for the protocol:
+Here is an example transport implementation for the protocol:
 
 ``` haskell
--- | Two-directional communication: send and receive
+-- | Bi-directional in process communication: send and receive
 data Duplex a = Duplex { sendChan :: Chan a, recvChan :: Chan a }
 
 -- | Help for swapping the send and receive channels
@@ -60,17 +60,17 @@ Here are the server and client logic implementations:
 ``` haskell
 server :: ServerM Start Quit ()
 server = flip fix 1 (\f x -> do
-    transition
+    transition -- enter the transition of state 'Start'
     if x <= (5 :: Int)
     then do
       t1 <- liftIO getCurrentTime
       send (Left Ping)
-      route @(C Pong :> S NominalDiffTime :> Start)
+      route @(C Pong :> S NominalDiffTime :> Start) -- pick a particular route
       Pong <- receive
       t2 <- liftIO getCurrentTime
       send (diffUTCTime t2 t1)
       liftIO (threadDelay 1000000)
-      f (x + 1)
+      f (x + 1) -- loop
     else do
       send (Right GoodBye)
       route @Quit
@@ -78,7 +78,7 @@ server = flip fix 1 (\f x -> do
 
 client :: ClientM Start Quit ()
 client = fix (\f -> do
-    transition
+    transition -- enter the transition of state 'Start - client side
     msg <- receive
     case msg of
       Left Ping -> do
@@ -93,8 +93,7 @@ client = fix (\f -> do
     )
 ```
 
-Here are the server and client running (assuming corresponding client
-implementations for the transport and logic):
+Here are the server and client running:
 
 ``` haskell
 main :: IO ()
