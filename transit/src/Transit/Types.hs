@@ -27,7 +27,7 @@ data Transport p1 map where
     :: forall p p1 p2 c
     . (p ~ (p1 :<|> p2))
     => Transport p1 c -> Transport p2 c -> Transport p c
-  Transition -- Would be nice to avoid this
+  Transition -- Would be nice to avoid this extra constructor
     :: forall p1 p2 c
     . (Transition p1 ~ p2)
     => Transport p2 c -> Transport p1 c
